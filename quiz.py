@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Quiz Applet v1.4
+Quiz Applet v1.6
 Widget de bureau web — mode fenêtres ou mode onglets
 Config : ~/.config/quiz-applet/default.json
 """
@@ -8,6 +8,26 @@ Config : ~/.config/quiz-applet/default.json
 VERSION = "1.5"
 
 import gi, os, sys, json, threading, signal, uuid
+
+CONFIG_DIR     = os.path.expanduser("~/.config/quiz-applet")
+CONFIG_FILE    = os.path.join(CONFIG_DIR, "default.json")
+
+
+def _load_startup_config() -> dict:
+    try:
+        with open(CONFIG_FILE) as f:
+            cfg = json.load(f)
+    except Exception:
+        return {}
+    if cfg.get("backend") not in ("auto", "wayland", "x11"):
+        cfg["backend"] = "auto"
+    return cfg
+
+_startup_cfg = _load_startup_config()
+_backend = _startup_cfg.get("backend")
+if _backend in ("wayland", "x11"):
+    os.environ["GDK_BACKEND"] = _backend
+
 
 gi.require_version('Gtk', '3.0')
 gi.require_version('Gdk', '3.0')
@@ -131,6 +151,7 @@ DEFAULT_APP_CONFIG: dict = {
     "version"      : VERSION,
     "autostart"    : False,
     "display_mode" : "windowed",
+    "backend"      : "auto",
     "windows"      : [],
 }
 
@@ -144,6 +165,8 @@ def load_config() -> dict:
                 base.update(json.load(f))
         except Exception:
             pass
+    if base.get("backend") not in ("auto", "wayland", "x11"):
+        base["backend"] = "auto"
     if not base["windows"]:
         base["windows"].append(new_win_cfg("Fenêtre 1"))
     for w in base["windows"]:
@@ -468,6 +491,13 @@ class QuizWindow(Gtk.Window):
             self.set_resizable(False)
             # Appliquer always-on-top immédiatement
             self.set_keep_above(True)
+            # Demander aussi à GTK de présenter la fenêtre pour la
+            # remonter immédiatement au-dessus des autres (améliore
+            # le comportement avec certains compositeurs).
+            try:
+                self.present()
+            except Exception:
+                pass
             self.set_keep_below(False)
             # Démarrer le timer de maintien
             self._start_pin_timer()
@@ -503,6 +533,10 @@ class QuizWindow(Gtk.Window):
 
         # Réappliquer always-on-top (Wayland peut l'oublier)
         self.set_keep_above(True)
+        try:
+            self.present()
+        except Exception:
+            pass
 
         # Restaurer la position si elle a dérivé
         cx, cy = self.get_position()
@@ -706,6 +740,10 @@ class QuizTabWindow(Gtk.Window):
             self.resize(w, h)
             self.set_resizable(False)
             self.set_keep_above(True)
+            try:
+                self.present()
+            except Exception:
+                pass
             self._pin_timer = GLib.timeout_add(self._PIN_INTERVAL, self._enforce_pin)
         else:
             # Libérer la contrainte de taille AVANT de rendre la fenêtre redimensionnable
@@ -721,6 +759,10 @@ class QuizTabWindow(Gtk.Window):
         if not self._pinned:
             return False
         self.set_keep_above(True)
+        try:
+            self.present()
+        except Exception:
+            pass
         cx, cy = self.get_position()
         if abs(cx - self._locked_x) > 8 or abs(cy - self._locked_y) > 8:
             self.move(self._locked_x, self._locked_y)
@@ -866,6 +908,34 @@ class QuizApp:
         self.tab_window : QuizTabWindow | None = None
         self.tray       = None
 
+    def _current_backend(self) -> str:
+        env = os.environ.get("GDK_BACKEND", "").lower()
+        if env in ("x11", "wayland"):
+            return env
+        try:
+            display = Gdk.Display.get_default()
+            if display:
+                return display.get_backend()
+        except Exception:
+            pass
+        return "auto"
+
+    def _set_backend_and_restart(self, backend: str):
+        if backend not in ("auto", "wayland", "x11"):
+            return
+        self.config["backend"] = backend
+        self.save()
+
+        env = os.environ.copy()
+        if backend == "auto":
+            env.pop("GDK_BACKEND", None)
+        else:
+            env["GDK_BACKEND"] = backend
+
+        python = sys.executable
+        script = os.path.abspath(__file__)
+        os.execvpe(python, [python, script], env)
+
     @property
     def mode(self) -> str:
         return self.config.get("display_mode", "windowed")
@@ -1005,10 +1075,25 @@ class QuizApp:
         def _switch(icon, item):
             GLib.idle_add(self.switch_mode)
 
+        def _backend_label(value: str) -> str:
+            current = self.config.get("backend", "auto")
+            mark = "✓" if current == value else "○"
+            return f"{mark} {value.title()}"
+
+        def _set_backend(icon, item, backend: str):
+            if self.config.get("backend", "auto") == backend:
+                return
+            GLib.idle_add(self._set_backend_and_restart, backend)
+
         items = [
             pystray.MenuItem(f"Quiz Applet  v{VERSION}", None, enabled=False),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(mode_label, _switch),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Backend :", None, enabled=False),
+            pystray.MenuItem(_backend_label("auto"), lambda icon, item: _set_backend(icon, item, "auto")),
+            pystray.MenuItem(_backend_label("x11"), lambda icon, item: _set_backend(icon, item, "x11")),
+            pystray.MenuItem(_backend_label("wayland"), lambda icon, item: _set_backend(icon, item, "wayland")),
             pystray.Menu.SEPARATOR,
         ]
 
