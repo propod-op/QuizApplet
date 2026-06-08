@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-Quiz Applet v1.2
+Quiz Applet v1.4
 Widget de bureau web — mode fenêtres ou mode onglets
 Config : ~/.config/quiz-applet/default.json
 """
 
-VERSION = "1.3"
+VERSION = "1.5"
 
 import gi, os, sys, json, threading, signal, uuid
 
@@ -27,6 +27,12 @@ if not _wk_ok:
 from gi.repository import Gtk, Gdk, GLib, WebKit2
 
 try:
+    from gi.repository import GdkPixbuf
+    _HAS_PIXBUF = True
+except ImportError:
+    _HAS_PIXBUF = False
+
+try:
     import pystray
     from PIL import Image, ImageDraw, ImageFont
     _HAS_TRAY = True
@@ -43,7 +49,63 @@ CONFIG_FILE    = os.path.join(CONFIG_DIR, "default.json")
 AUTOSTART_DIR  = os.path.expanduser("~/.config/autostart")
 AUTOSTART_FILE = os.path.join(AUTOSTART_DIR, "quiz-applet.desktop")
 
-MODES = ("windowed", "tabbed")   # modes disponibles
+MODES = ("windowed", "tabbed")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Icône épingle (SVG Material Design thumbtack)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# SVG épingle (Material Design — thumbtack)
+_PIN_SVG = (
+    b'<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" '
+    b'viewBox="0 0 24 24">'
+    b'<path fill="white" '
+    b'd="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/>'
+    b'</svg>'
+)
+
+_PIN_SVG_ACTIVE = (
+    b'<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" '
+    b'viewBox="0 0 24 24">'
+    b'<path fill="#f39c12" '
+    b'd="M16 12V4h1V2H7v2h1v8l-2 2v2h5.2v6h1.6v-6H18v-2l-2-2z"/>'
+    b'</svg>'
+)
+
+
+def _load_svg_pixbuf(svg_bytes: bytes):
+    """Charge un SVG inline en GdkPixbuf."""
+    if not _HAS_PIXBUF:
+        return None
+    try:
+        ldr = GdkPixbuf.PixbufLoader.new_with_mime_type("image/svg+xml")
+        ldr.write(svg_bytes)
+        ldr.close()
+        return ldr.get_pixbuf()
+    except Exception:
+        return None
+
+
+def _make_pin_image(active: bool = False) -> Gtk.Widget:
+    """
+    Retourne un Gtk.Image avec l'icône épingle.
+    Priorité : icon theme → SVG inline → emoji label.
+    """
+    # 1) Essai via le thème GTK (Adwaita 42+)
+    theme = Gtk.IconTheme.get_default()
+    for name in ("pin-symbolic", "view-pin-symbolic"):
+        if theme.has_icon(name):
+            return Gtk.Image.new_from_icon_name(name, Gtk.IconSize.BUTTON)
+
+    # 2) SVG inline
+    svg = _PIN_SVG_ACTIVE if active else _PIN_SVG
+    pb  = _load_svg_pixbuf(svg)
+    if pb:
+        return Gtk.Image.new_from_pixbuf(pb)
+
+    # 3) Repli texte
+    return Gtk.Label(label="📌")
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Config
@@ -57,6 +119,7 @@ def new_win_cfg(name: str = "Nouvelle fenêtre",
         "url"             : url,
         "always_on_top"   : False,
         "stick_to_desktop": False,
+        "pinned"          : False,   # ← v1.4 : épingle (toujours devant + verrouillage)
         "enabled"         : True,
         "width"           : 900,
         "height"          : 600,
@@ -67,7 +130,7 @@ def new_win_cfg(name: str = "Nouvelle fenêtre",
 DEFAULT_APP_CONFIG: dict = {
     "version"      : VERSION,
     "autostart"    : False,
-    "display_mode" : "windowed",   # "windowed" | "tabbed"
+    "display_mode" : "windowed",
     "windows"      : [],
 }
 
@@ -83,10 +146,10 @@ def load_config() -> dict:
             pass
     if not base["windows"]:
         base["windows"].append(new_win_cfg("Fenêtre 1"))
-    # S'assurer que chaque fenêtre a un id
     for w in base["windows"]:
         if not w.get("id"):
             w["id"] = uuid.uuid4().hex[:8]
+        w.setdefault("pinned", False)
     if base.get("display_mode") not in MODES:
         base["display_mode"] = "windowed"
     return base
@@ -106,8 +169,8 @@ def make_tray_icon() -> "Image.Image":
     size = 64
     img  = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     d    = ImageDraw.Draw(img)
-    d.ellipse([2, 2, 62, 62], fill=(39, 174, 96))
-    d.ellipse([6, 6, 58, 58], fill=(46, 204, 113))
+    d.ellipse([2, 2, 62, 62], fill=(30, 132, 73))
+    d.ellipse([6, 6, 58, 58], fill=(39, 174, 96))
     try:
         font = ImageFont.truetype(
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 30)
@@ -134,7 +197,7 @@ class NewWindowDialog(Gtk.Dialog):
         self.set_default_size(420, -1)
         self.set_modal(True)
 
-        box = self.get_content_area()
+        box  = self.get_content_area()
         grid = Gtk.Grid(row_spacing=10, column_spacing=10,
                         margin_top=14, margin_bottom=14,
                         margin_start=14, margin_end=14)
@@ -166,7 +229,7 @@ class DeleteWindowDialog(Gtk.Dialog):
         self.set_default_size(380, -1)
         self.set_modal(True)
 
-        box = self.get_content_area()
+        box  = self.get_content_area()
         grid = Gtk.Grid(row_spacing=10, column_spacing=10,
                         margin_top=14, margin_bottom=14,
                         margin_start=14, margin_end=14)
@@ -195,7 +258,7 @@ class ConfigDialog(Gtk.Dialog):
         self.set_default_size(460, -1)
         self.set_modal(True)
 
-        box = self.get_content_area()
+        box  = self.get_content_area()
         grid = Gtk.Grid(row_spacing=12, column_spacing=10,
                         margin_top=14, margin_bottom=14,
                         margin_start=14, margin_end=14)
@@ -215,26 +278,17 @@ class ConfigDialog(Gtk.Dialog):
                           margin_top=4, margin_bottom=4),
             0, 2, 2, 1)
 
-        self.chk_aot = Gtk.CheckButton(
-            label="🔝  Toujours au premier plan (always on top)",
-            active=win_cfg.get("always_on_top", False))
-        grid.attach(self.chk_aot, 0, 3, 2, 1)
-
         self.chk_desk = Gtk.CheckButton(
             label="📌  Collé au bureau (derrière toutes les fenêtres)",
             active=win_cfg.get("stick_to_desktop", False))
-        grid.attach(self.chk_desk, 0, 4, 2, 1)
+        grid.attach(self.chk_desk, 0, 3, 2, 1)
 
-        note = Gtk.Label(xalign=0, margin_top=2)
+        note = Gtk.Label(xalign=0, margin_top=4)
         note.set_markup(
-            "<small><i>ℹ  Mutuellement exclusifs. "
-            "Sur Wayland, utilisez GDK_BACKEND=x11 pour always-on-top.</i></small>")
-        grid.attach(note, 0, 5, 2, 1)
-
-        self.chk_aot.connect("toggled",
-            lambda b: self.chk_desk.set_active(False) if b.get_active() else None)
-        self.chk_desk.connect("toggled",
-            lambda b: self.chk_aot.set_active(False) if b.get_active() else None)
+            "<small><i>ℹ  Pour épingler au premier plan, utilisez le bouton 📌 "
+            "dans la barre de titre.\n"
+            "Sur Wayland : lancez avec GDK_BACKEND=x11 pour un épinglage fiable.</i></small>")
+        grid.attach(note, 0, 4, 2, 1)
 
         box.show_all()
 
@@ -242,13 +296,12 @@ class ConfigDialog(Gtk.Dialog):
         return {
             "name"            : self.entry_name.get_text().strip(),
             "url"             : self.entry_url.get_text().strip(),
-            "always_on_top"   : self.chk_aot.get_active(),
             "stick_to_desktop": self.chk_desk.get_active(),
         }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Helpers header bar
+# Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _hb_btn(label: str, tooltip: str, callback) -> Gtk.Button:
@@ -258,18 +311,62 @@ def _hb_btn(label: str, tooltip: str, callback) -> Gtk.Button:
     return b
 
 
+def _info_dialog(parent, text: str):
+    dlg = Gtk.MessageDialog(
+        transient_for=parent, flags=0,
+        message_type=Gtk.MessageType.WARNING,
+        buttons=Gtk.ButtonsType.OK, text=text)
+    dlg.run(); dlg.destroy()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CSS — style du bouton épingle actif
+# ─────────────────────────────────────────────────────────────────────────────
+
+_CSS = b"""
+.pin-active {
+    background-color: #e67e22;
+    color: white;
+    border-color: #d35400;
+}
+.pin-active:hover {
+    background-color: #d35400;
+}
+"""
+
+def _apply_css():
+    provider = Gtk.CssProvider()
+    provider.load_from_data(_CSS)
+    Gtk.StyleContext.add_provider_for_screen(
+        Gdk.Screen.get_default(),
+        provider,
+        Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+    )
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MODE FENÊTRES — QuizWindow
 # ─────────────────────────────────────────────────────────────────────────────
 
 class QuizWindow(Gtk.Window):
-    """Une fenêtre indépendante (mode windowed)."""
+
+    # Intervalle du timer de maintien always-on-top (ms)
+    _PIN_INTERVAL = 900
 
     def __init__(self, win_cfg: dict, app: "QuizApp"):
         super().__init__()
         self._cfg        = win_cfg
         self._app        = app
         self._save_timer = None
+        self._pin_timer  = None
+
+        # État épingle
+        self._pinned     = win_cfg.get("pinned", False)
+        # Position/taille verrouillées quand épinglé
+        self._locked_x   = win_cfg.get("x",      100)
+        self._locked_y   = win_cfg.get("y",      100)
+        self._locked_w   = win_cfg.get("width",   900)
+        self._locked_h   = win_cfg.get("height",  600)
 
         self.set_default_size(win_cfg["width"], win_cfg["height"])
         self.move(win_cfg["x"], win_cfg["y"])
@@ -289,13 +386,24 @@ class QuizWindow(Gtk.Window):
         self._win_btn.connect("clicked", lambda *_: self._rebuild_win_menu())
         hb.pack_start(self._win_btn)
 
-        # Droite : ✕ ⚙ ⊟ ✚
+        # Droite : ✕ ⚙ ⊟ 📌 ✚
         hb.pack_end(_hb_btn("✕", "Masquer cette fenêtre",
                              lambda *_: self._hide()))
         hb.pack_end(_hb_btn("⚙", "Configurer cette fenêtre",
                              lambda *_: self._on_config()))
         hb.pack_end(_hb_btn("⊟", "Passer en mode onglets",
                              lambda *_: GLib.idle_add(self._app.switch_mode)))
+
+        # ── Bouton épingle (ToggleButton) ─────────────────────────────────
+        self._pin_btn = Gtk.ToggleButton()
+        self._pin_btn.set_tooltip_text(
+            "📌  Épingler au premier plan\n"
+            "Verrouille aussi la position et la taille")
+        self._pin_btn.set_active(self._pinned)
+        self._update_pin_button_ui()
+        self._pin_btn.connect("toggled", self._on_pin_toggled)
+        hb.pack_end(self._pin_btn)
+
         hb.pack_end(_hb_btn("✚", "Nouvelle fenêtre",
                              lambda *_: self._app.create_new_window_dialog(self)))
 
@@ -308,20 +416,116 @@ class QuizWindow(Gtk.Window):
         # ── Signaux ───────────────────────────────────────────────────────
         self.connect("delete-event",    self._on_delete)
         self.connect("configure-event", self._on_configure)
-        self.connect("realize",         lambda *_: self._apply_hints())
+        self.connect("realize",         lambda *_: self._post_realize())
 
         self.show_all()
-        GLib.idle_add(self._apply_hints)
 
-    # ── Window hints ──────────────────────────────────────────────────────
+    # ── Post-réalisation ──────────────────────────────────────────────────
+
+    def _post_realize(self):
+        self._apply_hints()
+        GLib.idle_add(self._apply_hints)
+        if self._pinned:
+            self._start_pin_timer()
+
+    # ── Icône du bouton épingle ───────────────────────────────────────────
+
+    def _update_pin_button_ui(self):
+        """Met à jour l'icône et le style CSS du bouton épingle."""
+        # Vider le contenu actuel
+        child = self._pin_btn.get_child()
+        if child:
+            self._pin_btn.remove(child)
+
+        img = _make_pin_image(active=self._pinned)
+        self._pin_btn.add(img)
+        img.show()
+
+        ctx = self._pin_btn.get_style_context()
+        if self._pinned:
+            ctx.add_class("pin-active")
+            ctx.remove_class("pin-inactive")
+        else:
+            ctx.remove_class("pin-active")
+
+    # ── Logique épingle ───────────────────────────────────────────────────
+
+    def _on_pin_toggled(self, btn):
+        self._pinned = btn.get_active()
+        self._cfg["pinned"] = self._pinned
+
+        if self._pinned:
+            # Capturer position + taille AVANT tout changement GTK
+            x, y = self.get_position()
+            w, h = self.get_size()
+            self._locked_x, self._locked_y = x, y
+            self._locked_w, self._locked_h = w, h
+            self._cfg.update({"x": x, "y": y, "width": w, "height": h})
+            # Figer la taille AVANT set_resizable(False)
+            # (sinon GTK réduit la fenêtre à sa taille minimale naturelle)
+            self.set_size_request(w, h)
+            self.resize(w, h)
+            self.set_resizable(False)
+            # Appliquer always-on-top immédiatement
+            self.set_keep_above(True)
+            self.set_keep_below(False)
+            # Démarrer le timer de maintien
+            self._start_pin_timer()
+        else:
+            # Libérer la contrainte de taille AVANT de rendre la fenêtre redimensionnable
+            self.set_size_request(-1, -1)
+            self.set_resizable(True)
+            self.set_keep_above(False)
+            self._stop_pin_timer()
+            self._apply_hints()
+
+        self._update_pin_button_ui()
+        self._app.save()
+
+    def _start_pin_timer(self):
+        """Démarre un timer qui réapplique always-on-top périodiquement."""
+        self._stop_pin_timer()
+        self._pin_timer = GLib.timeout_add(self._PIN_INTERVAL, self._enforce_pin)
+
+    def _stop_pin_timer(self):
+        if self._pin_timer is not None:
+            GLib.source_remove(self._pin_timer)
+            self._pin_timer = None
+
+    def _enforce_pin(self) -> bool:
+        """
+        Callback du timer : réapplique always-on-top et restaure
+        la position/taille si la fenêtre a été déplacée/redimensionnée.
+        Retourne True pour continuer, False pour arrêter.
+        """
+        if not self._pinned:
+            return False
+
+        # Réappliquer always-on-top (Wayland peut l'oublier)
+        self.set_keep_above(True)
+
+        # Restaurer la position si elle a dérivé
+        cx, cy = self.get_position()
+        if abs(cx - self._locked_x) > 8 or abs(cy - self._locked_y) > 8:
+            self.move(self._locked_x, self._locked_y)
+
+        return True   # continuer le timer
+
+    # ── Window hints (stick to desktop, etc.) ────────────────────────────
 
     def _apply_hints(self):
-        aot  = self._cfg.get("always_on_top", False)
-        desk = self._cfg.get("stick_to_desktop", False)
-        self.set_keep_above(aot and not desk)
-        self.set_keep_below(desk)
-        self.set_skip_taskbar_hint(desk)
-        self.set_skip_pager_hint(desk)
+        if self._pinned:
+            # Épinglé : always-on-top prime sur tout
+            self.set_keep_above(True)
+            self.set_keep_below(False)
+            self.set_skip_taskbar_hint(False)
+            self.set_skip_pager_hint(False)
+        else:
+            desk = self._cfg.get("stick_to_desktop", False)
+            self.set_keep_above(False)
+            self.set_keep_below(desk)
+            self.set_skip_taskbar_hint(desk)
+            self.set_skip_pager_hint(desk)
         return False
 
     # ── Menu fenêtres ─────────────────────────────────────────────────────
@@ -334,8 +538,13 @@ class QuizWindow(Gtk.Window):
             win     = self._app.windows.get(wid)
             visible = win is not None and win.get_visible()
             is_self = (wid == self._cfg["id"])
-            label   = f"{'▶' if is_self else ('✓' if visible else '○')}  {wcfg['name']}"
-            item    = Gtk.MenuItem(label=label)
+            pinned  = wcfg.get("pinned", False)
+            label   = (
+                f"{'▶' if is_self else ('✓' if visible else '○')}"
+                f"{'  📌' if pinned else ''}"
+                f"  {wcfg['name']}"
+            )
+            item = Gtk.MenuItem(label=label)
             item.set_sensitive(not is_self)
 
             def _cb(_, w=wid):
@@ -365,6 +574,9 @@ class QuizWindow(Gtk.Window):
         return True
 
     def _on_configure(self, widget, event):
+        """Sauvegarde position/taille — ignorée si épinglé."""
+        if self._pinned:
+            return False
         x, y = self.get_position()
         w, h = self.get_size()
         self._cfg.update({"x": x, "y": y, "width": w, "height": h})
@@ -389,10 +601,15 @@ class QuizWindow(Gtk.Window):
         self._apply_hints()
 
     def _hide(self):
+        self._stop_pin_timer()
         self.hide()
         self._cfg["enabled"] = False
         self._app.save()
         self._app.rebuild_tray_menu()
+
+    def destroy(self):
+        self._stop_pin_timer()
+        super().destroy()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -402,11 +619,19 @@ class QuizWindow(Gtk.Window):
 class QuizTabWindow(Gtk.Window):
     """Fenêtre unique avec onglets (mode tabbed)."""
 
+    _PIN_INTERVAL = 900
+
     def __init__(self, app: "QuizApp"):
         super().__init__()
         self._app        = app
         self._webviews   : dict[str, WebKit2.WebView] = {}
         self._save_timer = None
+        self._pinned     = False
+        self._pin_timer  = None
+        self._locked_x   = 100
+        self._locked_y   = 100
+        self._locked_w   = 1100
+        self._locked_h   = 700
 
         self.set_default_size(1100, 700)
 
@@ -416,11 +641,22 @@ class QuizTabWindow(Gtk.Window):
         hb.set_title("Quiz Applet")
         self.set_titlebar(hb)
 
-        # Droite : ✕ ⚙ ⊞ ✚
+        # Droite : ✕ ⚙ 📌 ⊞ ✚
         hb.pack_end(_hb_btn("✕", "Fermer l'onglet courant",
                              lambda *_: self._close_current_tab()))
         hb.pack_end(_hb_btn("⚙", "Configurer l'onglet courant",
                              lambda *_: self._config_current_tab()))
+
+        # Bouton épingle
+        self._pin_btn = Gtk.ToggleButton()
+        self._pin_btn.set_tooltip_text(
+            "📌  Épingler au premier plan\n"
+            "Verrouille aussi la position et la taille")
+        self._pin_btn.set_active(False)
+        self._update_pin_button_ui()
+        self._pin_btn.connect("toggled", self._on_pin_toggled)
+        hb.pack_end(self._pin_btn)
+
         hb.pack_end(_hb_btn("⊞", "Passer en mode fenêtres séparées",
                              lambda *_: GLib.idle_add(self._app.switch_mode)))
         hb.pack_end(_hb_btn("✚", "Nouvel onglet",
@@ -434,25 +670,73 @@ class QuizTabWindow(Gtk.Window):
         self._nb.connect("switch-page", self._on_switch_page)
         self.add(self._nb)
 
-        # ── Signaux fenêtre ───────────────────────────────────────────────
         self.connect("delete-event",    self._on_delete)
         self.connect("configure-event", self._on_configure)
+        self.connect("realize",         lambda *_: GLib.idle_add(self._apply_hints))
 
-        # Peupler les onglets
         for wcfg in self._app.config["windows"]:
             self._add_tab(wcfg)
 
         self.show_all()
 
+    # ── Épingle (tab window) ──────────────────────────────────────────────
+
+    def _update_pin_button_ui(self):
+        child = self._pin_btn.get_child()
+        if child:
+            self._pin_btn.remove(child)
+        img = _make_pin_image(active=self._pinned)
+        self._pin_btn.add(img)
+        img.show()
+        ctx = self._pin_btn.get_style_context()
+        if self._pinned:
+            ctx.add_class("pin-active")
+        else:
+            ctx.remove_class("pin-active")
+
+    def _on_pin_toggled(self, btn):
+        self._pinned = btn.get_active()
+        if self._pinned:
+            x, y = self.get_position()
+            w, h = self.get_size()
+            self._locked_x, self._locked_y = x, y
+            self._locked_w, self._locked_h = w, h
+            # Figer la taille AVANT set_resizable(False)
+            self.set_size_request(w, h)
+            self.resize(w, h)
+            self.set_resizable(False)
+            self.set_keep_above(True)
+            self._pin_timer = GLib.timeout_add(self._PIN_INTERVAL, self._enforce_pin)
+        else:
+            # Libérer la contrainte de taille AVANT de rendre la fenêtre redimensionnable
+            self.set_size_request(-1, -1)
+            self.set_resizable(True)
+            self.set_keep_above(False)
+            if self._pin_timer:
+                GLib.source_remove(self._pin_timer)
+                self._pin_timer = None
+        self._update_pin_button_ui()
+
+    def _enforce_pin(self) -> bool:
+        if not self._pinned:
+            return False
+        self.set_keep_above(True)
+        cx, cy = self.get_position()
+        if abs(cx - self._locked_x) > 8 or abs(cy - self._locked_y) > 8:
+            self.move(self._locked_x, self._locked_y)
+        return True
+
+    def _apply_hints(self):
+        if not self._pinned:
+            self.set_keep_above(False)
+        return False
+
     # ── Onglets ───────────────────────────────────────────────────────────
 
     def _make_tab_label(self, wcfg: dict) -> Gtk.Widget:
-        """Crée un label d'onglet : [nom] [✕]."""
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-
         lbl = Gtk.Label(label=wcfg["name"])
         box.pack_start(lbl, True, True, 0)
-
         btn = Gtk.Button()
         btn.set_relief(Gtk.ReliefStyle.NONE)
         btn.set_focus_on_click(False)
@@ -479,7 +763,6 @@ class QuizTabWindow(Gtk.Window):
         self._nb.set_tab_reorderable(wv, True)
 
     def add_new_tab(self, wcfg: dict):
-        """Ajoute un onglet et le sélectionne."""
         self._add_tab(wcfg)
         self.show_all()
         wv  = self._webviews.get(wcfg["id"])
@@ -507,7 +790,7 @@ class QuizTabWindow(Gtk.Window):
         if idx < 0:
             return None
         wv = self._nb.get_nth_page(idx)
-        return next((wid for wid, w in self._webviews.items() if w is wv), None)
+        return next((w for w, v in self._webviews.items() if v is wv), None)
 
     def _close_current_tab(self):
         wid = self._current_wid()
@@ -526,7 +809,6 @@ class QuizTabWindow(Gtk.Window):
         if dlg.run() == Gtk.ResponseType.OK:
             vals = dlg.get_values()
             win_cfg.update(vals)
-            # Mettre à jour le label d'onglet
             wv = self._webviews.get(wid)
             if wv:
                 idx = self._nb.page_num(wv)
@@ -540,7 +822,7 @@ class QuizTabWindow(Gtk.Window):
     # ── Signaux ───────────────────────────────────────────────────────────
 
     def _on_switch_page(self, nb, page, idx):
-        wv = self._nb.get_nth_page(idx)
+        wv  = self._nb.get_nth_page(idx)
         wid = next((w for w, v in self._webviews.items() if v is wv), None)
         if wid:
             wcfg = next(
@@ -554,6 +836,8 @@ class QuizTabWindow(Gtk.Window):
         return True
 
     def _on_configure(self, widget, event):
+        if self._pinned:
+            return False
         if self._save_timer:
             GLib.source_remove(self._save_timer)
         self._save_timer = GLib.timeout_add(500, self._flush_save)
@@ -564,17 +848,10 @@ class QuizTabWindow(Gtk.Window):
         self._save_timer = None
         return False
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Helper
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _info_dialog(parent, text: str):
-    dlg = Gtk.MessageDialog(
-        transient_for=parent, flags=0,
-        message_type=Gtk.MessageType.WARNING,
-        buttons=Gtk.ButtonsType.OK, text=text)
-    dlg.run(); dlg.destroy()
+    def destroy(self):
+        if self._pin_timer:
+            GLib.source_remove(self._pin_timer)
+        super().destroy()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -585,13 +862,9 @@ class QuizApp:
 
     def __init__(self):
         self.config     = load_config()
-        # Mode fenêtres
         self.windows    : dict[str, QuizWindow] = {}
-        # Mode onglets
         self.tab_window : QuizTabWindow | None = None
         self.tray       = None
-
-    # ── Propriété mode ────────────────────────────────────────────────────
 
     @property
     def mode(self) -> str:
@@ -601,15 +874,12 @@ class QuizApp:
     def mode(self, value: str):
         self.config["display_mode"] = value
 
-    # ── Persistance ───────────────────────────────────────────────────────
-
     def save(self):
         save_config(self.config)
 
     # ── Basculement de mode ───────────────────────────────────────────────
 
     def switch_mode(self):
-        """Bascule entre mode fenêtres et mode onglets (GTK thread)."""
         if self.mode == "windowed":
             self._destroy_windows()
             self.mode = "tabbed"
@@ -622,7 +892,7 @@ class QuizApp:
                 self._open_window(wcfg)
         self.save()
         self.rebuild_tray_menu()
-        return False   # pour GLib.idle_add
+        return False
 
     def _destroy_windows(self):
         for win in list(self.windows.values()):
@@ -634,7 +904,7 @@ class QuizApp:
             self.tab_window.destroy()
             self.tab_window = None
 
-    # ── Gestion fenêtres (mode windowed) ──────────────────────────────────
+    # ── Gestion fenêtres ──────────────────────────────────────────────────
 
     def _open_window(self, win_cfg: dict):
         wid = win_cfg["id"]
@@ -648,14 +918,12 @@ class QuizApp:
         win_cfg["enabled"] = True
 
     def toggle_window_by_id(self, wid: str):
-        """Affiche/masque (windowed) ou bascule vers (tabbed) une fenêtre."""
         win_cfg = next(
             (w for w in self.config["windows"] if w["id"] == wid), None)
         if win_cfg is None:
             return
 
         if self.mode == "tabbed":
-            # En mode onglets : afficher le tab_window et aller à cet onglet
             if self.tab_window:
                 if not self.tab_window.get_visible():
                     self.tab_window.show_all()
@@ -666,7 +934,6 @@ class QuizApp:
                         self.tab_window._nb.set_current_page(idx)
                 self.tab_window.present()
         else:
-            # Mode fenêtres : toggle
             win = self.windows.get(wid)
             if win is None:
                 self._open_window(win_cfg)
@@ -709,7 +976,6 @@ class QuizApp:
         if len(wins) <= 1:
             _info_dialog(None, "Impossible de supprimer la dernière fenêtre.")
             return False
-
         dlg = DeleteWindowDialog(None, wins)
         if dlg.run() == Gtk.ResponseType.OK:
             wid = dlg.get_selected_id()
@@ -733,11 +999,8 @@ class QuizApp:
         if not self.tray:
             return
 
-        # Libellé du bouton de mode
-        if self.mode == "tabbed":
-            mode_label = "⊞  Passer en mode fenêtres"
-        else:
-            mode_label = "⊟  Passer en mode onglets"
+        mode_label = ("⊞  Mode fenêtres" if self.mode == "tabbed"
+                      else "⊟  Mode onglets")
 
         def _switch(icon, item):
             GLib.idle_add(self.switch_mode)
@@ -749,38 +1012,35 @@ class QuizApp:
             pystray.Menu.SEPARATOR,
         ]
 
-        # Liste des fenêtres / onglets
         def make_toggle(w):
             def _cb(icon, item):
                 GLib.idle_add(self.toggle_window_by_id, w)
             return _cb
 
         for wcfg in self.config["windows"]:
-            wid = wcfg["id"]
+            wid     = wcfg["id"]
+            pinned  = wcfg.get("pinned", False)
             if self.mode == "tabbed":
                 visible = (self.tab_window is not None
                            and self.tab_window.get_visible())
             else:
                 win = self.windows.get(wid)
                 visible = win is not None and win.get_visible()
-            label = f"{'✓' if visible else '○'}  {wcfg['name']}"
+            state = "✓" if visible else "○"
+            pin   = "  📌" if pinned else ""
+            label = f"{state}{pin}  {wcfg['name']}"
             items.append(pystray.MenuItem(label, make_toggle(wid)))
 
-        def _new(icon, item):
-            self.create_new_window_dialog()
-
-        def _del(icon, item):
-            self.delete_window_dialog()
-
-        def _quit_cb(icon, item):
-            self._quit()
+        def _new(icon, item):    self.create_new_window_dialog()
+        def _del(icon, item):    self.delete_window_dialog()
+        def _quit_cb(icon, item): self._quit()
 
         items += [
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("✚  Nouvelle fenêtre…",        _new),
-            pystray.MenuItem("🗑  Supprimer une fenêtre…",  _del),
+            pystray.MenuItem("✚  Nouvelle fenêtre…",       _new),
+            pystray.MenuItem("🗑  Supprimer une fenêtre…", _del),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quitter",                      _quit_cb),
+            pystray.MenuItem("Quitter",                     _quit_cb),
         ]
 
         self.tray.menu = pystray.Menu(*items)
@@ -830,6 +1090,7 @@ class QuizApp:
 
     def run(self):
         os.makedirs(CONFIG_DIR, exist_ok=True)
+        _apply_css()
 
         if self.mode == "tabbed":
             self.tab_window = QuizTabWindow(self)
@@ -848,8 +1109,6 @@ class QuizApp:
         Gtk.main()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Entrée
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
